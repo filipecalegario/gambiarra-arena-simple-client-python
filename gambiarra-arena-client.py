@@ -2,9 +2,9 @@
 import asyncio
 import json
 import time
-import uuid
 
 import websockets
+import httpx
 
 # ============================================
 # CONFIGURAÇÕES - Edite aqui conforme necessário
@@ -13,11 +13,19 @@ URL = "ws://192.168.0.212:3000/ws"  # URL do servidor WebSocket
 PIN = "937414"  # PIN da sessão
 PARTICIPANT_ID = "meuId"  # Se None, será gerado um UUID automaticamente
 NICKNAME = "Python Mock"  # Apelido do participante
-TOKEN_DELAY = 0.05  # Delay em segundos entre tokens mockados
+
+# Configurações do Ollama
+OLLAMA_URL = "http://localhost:11434"  # URL do servidor Ollama
+OLLAMA_MODEL = "qwen3:0.6b"  # Modelo a ser usado (ex: llama3.2, mistral, etc)
 # ============================================
 
 
 async def handle_challenge(ws, challenge: dict):
+    """
+    Trata mensagem de desafio vinda do servidor e envia:
+      - sequência de tokens gerados pelo Ollama (streaming)
+      - mensagem de conclusão com métricas
+    """
     round_id = challenge.get("round")
     prompt = challenge.get("prompt", "")
 
@@ -26,33 +34,69 @@ async def handle_challenge(ws, challenge: dict):
     print(f"prompt: {prompt}")
     print("=============================\n")
 
-    full_response = (
-        f"[MOCK] Esta é uma resposta mockada do participante "
-        f"'{NICKNAME}' para o prompt: {prompt}"
-    )
+    # Preparar requisição para Ollama
+    ollama_request = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": True,
+    }
 
-    tokens = full_response.split()
-    print(f"Tokens mockados gerados ({len(tokens)} tokens): {tokens}")
-    total_tokens = len(tokens)
-
+    seq = 0
+    total_tokens = 0
     start_time = time.perf_counter()
     first_token_time = None
+    full_response = ""
 
-    print("Enviando tokens mockados...")
-    for seq, token in enumerate(tokens):
-        if first_token_time is None:
-            first_token_time = time.perf_counter()
+    print(f"Consultando Ollama (modelo: {OLLAMA_MODEL})...")
 
-        token_msg = {
-            "type": "token",
-            "round": round_id,
-            "participant_id": PARTICIPANT_ID,
-            "seq": seq,
-            "content": token,
-        }
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            async with client.stream(
+                "POST",
+                f"{OLLAMA_URL}/api/generate",
+                json=ollama_request,
+            ) as response:
+                response.raise_for_status()
 
-        await ws.send(json.dumps(token_msg))
-        await asyncio.sleep(TOKEN_DELAY)
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    # Ollama retorna o token no campo "response"
+                    token_content = chunk.get("response", "")
+                    if not token_content:
+                        continue
+
+                    if first_token_time is None:
+                        first_token_time = time.perf_counter()
+
+                    full_response += token_content
+                    total_tokens += 1
+
+                    # Enviar token para o servidor
+                    token_msg = {
+                        "type": "token",
+                        "round": round_id,
+                        "participant_id": PARTICIPANT_ID,
+                        "seq": seq,
+                        "content": token_content,
+                    }
+
+                    await ws.send(json.dumps(token_msg))
+                    seq += 1
+
+                    # Verificar se é o último chunk
+                    if chunk.get("done", False):
+                        break
+
+    except Exception as e:
+        print(f"❌ Erro ao consultar Ollama: {e}")
+        return
 
     end_time = time.perf_counter()
 
@@ -62,14 +106,18 @@ async def handle_challenge(ws, challenge: dict):
     latency_first_token_ms = int((first_token_time - start_time) * 1000)
     duration_ms = int((end_time - start_time) * 1000)
 
+    print(f"\n✅ Resposta completa ({total_tokens} tokens):")
+    print(full_response)
+    print()
+
+    # Enviar mensagem de conclusão
     complete_msg = {
         "type": "complete",
         "round": round_id,
         "participant_id": PARTICIPANT_ID,
-        "tokens": total_tokens,  # ← métricas no nível raiz
+        "tokens": total_tokens,
         "latency_ms_first_token": latency_first_token_ms,
         "duration_ms": duration_ms,
-        # tpsAvg removido - não existe no schema
     }
 
     print("Enviando mensagem de conclusão com métricas:")
@@ -95,8 +143,8 @@ async def client_loop():
             "participant_id": PARTICIPANT_ID,
             "nickname": NICKNAME,
             "pin": PIN,
-            "runner": "mock",
-            "model": "MOCK-1.0",
+            "runner": "ollama",
+            "model": OLLAMA_MODEL,
         }
 
         print("Enviando mensagem de registro:")
