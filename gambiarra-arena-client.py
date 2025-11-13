@@ -9,15 +9,38 @@ import httpx
 # ============================================
 # CONFIGURAÇÕES - Edite aqui conforme necessário
 # ============================================
-URL = "ws://192.168.0.212:3000/ws"  # URL do servidor WebSocket
+HOST = "192.168.0.212"  # IP do servidor da arena
 PIN = "937414"  # PIN da sessão
-PARTICIPANT_ID = "meuId"  # Se None, será gerado um UUID automaticamente
+PARTICIPANT_ID = "meuId"  # ID do participante
 NICKNAME = "Python Mock"  # Apelido do participante
 
 # Configurações do Ollama
-OLLAMA_URL = "http://localhost:11434"  # URL do servidor Ollama
+OLLAMA_HOST = "localhost"  # Host do servidor Ollama
 OLLAMA_MODEL = "qwen3:0.6b"  # Modelo a ser usado (ex: llama3.2, mistral, etc)
 # ============================================
+
+# URLs construídas automaticamente
+URL = f"ws://{HOST}:3000/ws"
+OLLAMA_URL = f"http://{OLLAMA_HOST}:11434"
+
+
+def context_engineering(prompt: str) -> str:
+    """
+    Adiciona contexto e instruções ao prompt para melhorar a qualidade
+    das respostas do modelo.
+    """
+    system_instructions = """You are a helpful, accurate, and concise AI assistant.
+Follow these guidelines:
+- Be direct and to the point
+- Provide accurate information
+- If you don't know something, say so
+- Use clear and simple language
+- Focus on answering what was asked
+
+"""
+
+    enhanced_prompt = system_instructions + prompt
+    return enhanced_prompt
 
 
 async def handle_challenge(ws, challenge: dict):
@@ -29,15 +52,17 @@ async def handle_challenge(ws, challenge: dict):
     round_id = challenge.get("round")
     prompt = challenge.get("prompt", "")
 
+    enhanced_prompt = context_engineering(prompt)
+
     print("\n=== Novo desafio recebido ===")
     print(f"round: {round_id}")
-    print(f"prompt: {prompt}")
+    print(f"prompt: {enhanced_prompt}")
     print("=============================\n")
 
     # Preparar requisição para Ollama
     ollama_request = {
         "model": OLLAMA_MODEL,
-        "prompt": prompt,
+        "prompt": enhanced_prompt,
         "stream": True,
     }
 
